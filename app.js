@@ -893,6 +893,13 @@
   let modoAval = null;          // 'pad' quando a avaliação está rodando
   let calibrando = false;
   let estadoSalvo = null;
+  let modoEntrada = null; // 'pad-mic' ou 'pad-midi'
+
+  function selecionarModoEntradaPad() {
+    // Preferir MIDI quando disponível e o navegador suportar Web MIDI.
+    if (Avaliacao && Avaliacao.midi && Avaliacao.midi.suportado() && Avaliacao.midi.origemSegura()) return 'pad-midi';
+    return 'pad-mic';
+  }
 
   function avaliacaoDisponivel() {
     return !!est.rudimento;
@@ -930,35 +937,52 @@
     Motor.pararAlvos();
     if (est.tocando) pararTudo();
     if (Avaliacao.microfone.ligado()) Avaliacao.microfone.desligar();
+    if (Avaliacao.midi && Avaliacao.midi.ligado()) Avaliacao.midi.desligar();
     modoAval = null;
     calibrando = false;
+    modoEntrada = null;
     if (estadoSalvo) { restaurarEstado(); }
   }
 
   /* ---------- modo pad (microfone) ---------- */
   function comecarModoPad() {
     if (!avaliacaoDisponivel()) { avisar('Abra um rudimento antes de pedir nota.'); return; }
-    if (!Avaliacao.microfone.suportado()) {
-      avisar('Este navegador não oferece acesso ao microfone.');
-      return;
+    modoEntrada = selecionarModoEntradaPad();
+
+    if (modoEntrada === 'pad-mic') {
+      if (!Avaliacao.microfone.suportado()) {
+        avisar('Este navegador não oferece acesso ao microfone.');
+        return;
+      }
+      if (!Avaliacao.microfone.origemSegura()) {
+        avisar('O navegador só libera o microfone em endereço seguro (https) ou em localhost.\n\n' +
+               'No Mac, abra o app por http://localhost:8000 que funciona. ' +
+               'No celular isso vai funcionar na Fase 4, quando o app estiver publicado com https.');
+        return;
+      }
+      abrirJanela(
+        '<h3>🎧 Fone de ouvido é obrigatório</h3>' +
+        '<p class="destaque">Neste modo o microfone escuta o seu pad. Se o clique do metrônomo sair pelo ' +
+        'alto-falante, o microfone vai ouvir o clique e contar como se fosse batida sua — e a nota vira ficção.</p>' +
+        '<p>Coloque o fone antes de continuar. O áudio não é gravado nem enviado para lugar nenhum: ' +
+        'ele só passa pelo detector de batida e é descartado.</p>' +
+        '<div class="janela-botoes">' +
+        '<button class="btn-sec" data-acao="fechar-janela">Agora não</button>' +
+        '<button class="btn-play" data-acao="confirmar-fones">Estou com fone</button>' +
+        '</div>'
+      );
+    } else {
+      // MIDI: não depende do microfone e funciona com qualquer trigger MIDI via OTG.
+      abrirJanela(
+        '<h3>🎛️ Trigger via USB (MIDI)</h3>' +
+        '<p class="destaque">Conecte seu controlador MIDI no celular com OTG e habilite o acesso ao MIDI quando o navegador pedir.</p>' +
+        '<p>Quando você bater no pad, o app vai registrar as batidas pelo sinal MIDI (sem gravar áudio).</p>' +
+        '<div class="janela-botoes">' +
+        '<button class="btn-sec" data-acao="fechar-janela">Agora não</button>' +
+        '<button class="btn-play" data-acao="confirmar-fones">Estou pronto</button>' +
+        '</div>'
+      );
     }
-    if (!Avaliacao.microfone.origemSegura()) {
-      avisar('O navegador só libera o microfone em endereço seguro (https) ou em localhost.\n\n' +
-             'No Mac, abra o app por http://localhost:8000 que funciona. ' +
-             'No celular isso vai funcionar na Fase 4, quando o app estiver publicado com https.');
-      return;
-    }
-    abrirJanela(
-      '<h3>🎧 Fone de ouvido é obrigatório</h3>' +
-      '<p class="destaque">Neste modo o microfone escuta o seu pad. Se o clique do metrônomo sair pelo ' +
-      'alto-falante, o microfone vai ouvir o clique e contar como se fosse batida sua — e a nota vira ficção.</p>' +
-      '<p>Coloque o fone antes de continuar. O áudio não é gravado nem enviado para lugar nenhum: ' +
-      'ele só passa pelo detector de batida e é descartado.</p>' +
-      '<div class="janela-botoes">' +
-      '<button class="btn-sec" data-acao="fechar-janela">Agora não</button>' +
-      '<button class="btn-play" data-acao="confirmar-fones">Estou com fone</button>' +
-      '</div>'
-    );
   }
 
   function salvarEstado() {
@@ -977,9 +1001,14 @@
 
   async function iniciarCalibracao() {
     try {
-      await Avaliacao.microfone.ligar(aoDetectarBatida);
+      if (modoEntrada === 'pad-midi') {
+        await Avaliacao.midi.ligar(aoDetectarBatida);
+      } else {
+        await Avaliacao.microfone.ligar(aoDetectarBatida);
+      }
     } catch (e) {
-      avisar('Não consegui usar o microfone.\n\n' + (e && e.message ? e.message : e));
+      const qual = (modoEntrada === 'pad-midi') ? 'MIDI' : 'microfone';
+      avisar('Não consegui usar o ' + qual + '.\n\n' + (e && e.message ? e.message : e));
       return;
     }
     P.fonesConfirmados = true;
@@ -995,7 +1024,8 @@
     montarSubdivisoes(); montarPulsos(); refletir();
 
     calibrando = true;
-    Avaliacao.microfone.zerar();
+    if (modoEntrada === 'pad-midi') Avaliacao.midi.zerar();
+    else Avaliacao.microfone.zerar();
     Motor.iniciarAlvos();
     Motor.tocar();
 
@@ -1020,7 +1050,8 @@
   function terminarCalibracao() {
     calibrando = false;
     Motor.pararAlvos();
-    const r = Avaliacao.calcularLatencia(Avaliacao.microfone.onsets(), Motor.lerAlvos());
+    const onsets = (modoEntrada === 'pad-midi') ? Avaliacao.midi.onsets() : Avaliacao.microfone.onsets();
+    const r = Avaliacao.calcularLatencia(onsets, Motor.lerAlvos());
     pararTudo();
 
     if (!r) {
@@ -1055,7 +1086,8 @@
     marcarPratica();
     contagemRegressiva(function () {
       modoAval = 'pad';
-      Avaliacao.microfone.zerar();   // ignora as batidas dadas antes do zero
+      if (modoEntrada === 'pad-midi') Avaliacao.midi.zerar();
+      else Avaliacao.microfone.zerar();   // ignora as batidas dadas antes do zero
       Motor.iniciarAlvos();
       if (!est.tocando) Motor.tocar();
       refletir();
@@ -1072,12 +1104,15 @@
   function terminarModoPad() {
     Motor.pararAlvos();
     const latencia = (P.latenciaMs || 0) / 1000;
-    const toques = Avaliacao.microfone.onsets().map(function (t) { return t - latencia; });
+    const onsets = (modoEntrada === 'pad-midi') ? Avaliacao.midi.onsets() : Avaliacao.microfone.onsets();
+    const toques = onsets.map(function (t) { return t - latencia; });
     const r = Avaliacao.calcular(toques, Motor.lerAlvos(), Motor.intervaloAlvo());
-    Avaliacao.microfone.desligar();
+    if (modoEntrada === 'pad-midi') Avaliacao.midi.desligar();
+    else Avaliacao.microfone.desligar();
     $('tapa-batida').classList.add('oculto');
     pararTudo();
     modoAval = null;
+    modoEntrada = null;
     restaurarEstadoBatida();
     mostrarResultado(r, 'pad');
   }
@@ -1305,7 +1340,7 @@
       cada('aviso-silencio', function (el) { el.classList.toggle('oculto', !emSilencio); });
     }
     if (modoAval === 'pad') {
-      const n = Avaliacao.microfone.onsets().length;
+      const n = (modoEntrada === 'pad-midi') ? Avaliacao.midi.onsets().length : Avaliacao.microfone.onsets().length;
       const el = $('batida-contador');
       if (el && el.textContent !== String(n)) el.textContent = n;
     }
@@ -1345,9 +1380,14 @@
   atualizarJumestre();
 
   // aviso do modo pad conforme o endereço em que o app foi aberto
-  $('aval-aviso-mic').textContent = Avaliacao.microfone.origemSegura()
-    ? 'Exige fone de ouvido e uma calibração rápida antes de começar.'
-    : 'Indisponível neste endereço — o navegador só libera o microfone em https ou localhost.';
+  if (Avaliacao && Avaliacao.midi && Avaliacao.midi.suportado() && Avaliacao.midi.origemSegura()) {
+    $('aval-aviso-mic').textContent =
+      'Aceita triggers via USB OTG (MIDI). Se não quiser usar MIDI, use o modo microfone.';
+  } else {
+    $('aval-aviso-mic').textContent = Avaliacao.microfone.origemSegura()
+      ? 'Exige fone de ouvido e uma calibração rápida antes de começar.'
+      : 'Indisponível neste endereço — o navegador só libera o microfone em https ou localhost.';
+  }
 
   // check-in do Jumestre
   if (Progresso.primeiraVez()) {

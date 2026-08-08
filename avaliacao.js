@@ -203,6 +203,105 @@ const Avaliacao = (function () {
     };
   })();
 
+  /* ================== AVALIAÇÃO POR MIDI (TRIGGERS USB) ==================
+     Objetivo: suportar pads/trigger via MIDI (qualquer controlador compatível
+     com OTG/USB Host no Android).
+     Assumimos que o dispositivo envia Note On com velocity > 0 para cada golpe.
+     Web MIDI costuma exigir contexto seguro (https/localhost) e gesto do usuário.
+     ===================================================================== */
+  const midi = (function () {
+    let acesso = null, ligado = false;
+    let inputs = [];
+    let onsets = [];
+    let aoDetectar = null;
+    let ultimoEventoT = -Infinity;
+
+    const REFRATARIO_MS = 45; // evita contar o mesmo golpe duas vezes
+    const VELOCIDADE_PISO = 1; // velocity 0 já vira Note Off em geral
+
+    function suportado() {
+      return !!(navigator.requestMIDIAccess);
+    }
+
+    function origemSegura() {
+      return window.isSecureContext === true ||
+             location.protocol === 'https:' ||
+             location.hostname === 'localhost' ||
+             location.hostname === '127.0.0.1';
+    }
+
+    async function ligar(callback) {
+      if (ligado) return true;
+      if (!suportado()) throw new Error('Este navegador não oferece acesso ao MIDI (Web MIDI).');
+      if (!origemSegura()) throw new Error('O navegador só libera o MIDI em endereço seguro (https) ou em localhost.');
+      if (!Motor || !Motor.contexto) throw new Error('Motor indisponível para alinhamento de tempo.');
+
+      aoDetectar = callback || null;
+      onsets = [];
+      ultimoEventoT = -Infinity;
+
+      acesso = await navigator.requestMIDIAccess({ sysex: false });
+      // inputs no Web MIDI podem mudar; manter uma lista simples.
+      inputs = [];
+      acesso.inputs.forEach(function (inpt) { inputs.push(inpt); });
+
+      if (!inputs.length) throw new Error('Nenhuma entrada MIDI foi encontrada.');
+
+      inputs.forEach(function (inpt) {
+        inpt.onmidimessage = function (ev) {
+          if (!ligado) return;
+          const data = ev.data;
+          // MIDI bytes: [status, d1, d2]
+          const status = data[0];
+          const tipo = status & 0xf0;
+          const d1 = data[1];
+          const d2 = data[2];
+
+          // Note On: 0x9n com velocity > 0
+          if (tipo === 0x90 && d2 >= VELOCIDADE_PISO) {
+            // Alinha no relógio do áudio.
+            const ctx = Motor.contexto();
+            const agoraT = ctx.currentTime; // segundos
+            const deltaMs = (agoraT - ultimoEventoT) * 1000;
+            if (agoraT > 0 && deltaMs < REFRATARIO_MS) return;
+            ultimoEventoT = agoraT;
+
+            onsets.push(agoraT);
+            if (aoDetectar) aoDetectar(agoraT, onsets.length);
+          }
+        };
+      });
+
+      ligado = true;
+      return true;
+    }
+
+    function desligar() {
+      if (!ligado) return;
+      inputs.forEach(function (inpt) {
+        try { inpt.onmidimessage = null; } catch (e) {}
+      });
+      inputs = [];
+      acesso = null;
+      aoDetectar = null;
+      ligado = false;
+    }
+
+    function zerar() { onsets = []; }
+    function lerOnsets() { return onsets.slice(); }
+    function estaLigado() { return ligado; }
+
+    return {
+      suportado: suportado,
+      origemSegura: origemSegura,
+      ligar: ligar,
+      desligar: desligar,
+      zerar: zerar,
+      onsets: lerOnsets,
+      ligado: estaLigado
+    };
+  })();
+
   /* ================== CALIBRAÇÃO DA LATÊNCIA ================== */
   /* O aluno bate 8 vezes junto com o clique. A diferença média entre o
      que ouvimos e o que agendamos é a latência do aparelho + a mão do
@@ -229,6 +328,7 @@ const Avaliacao = (function () {
     calcular: calcular,
     diagnostico: diagnostico,
     microfone: microfone,
+    midi: midi,
     calcularLatencia: calcularLatencia
   };
 })();
